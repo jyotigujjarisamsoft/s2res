@@ -36,11 +36,12 @@ def create_sales_invoice_and_payment(contract_name):
         for item in items:
             if item["rate"]:
                 item_doc = frappe.get_doc("Item", item["item_code"])
-                income_account = item_doc.item_defaults[0].income_account if item_doc.item_defaults else "Sales - SSD"
+                income_account = item_doc.item_defaults[0].income_account if item_doc.item_defaults else None
                 deferred_account = item_doc.item_defaults[0].deferred_revenue_account if item_doc.enable_deferred_revenue else None
 
                 # Apply VAT 5% if contract is Commercial or Office
-                item_tax_template = "VAT 5% - SSD" if contract.used_for in ["Commercial", "Office"] and item["item_code"] in ["Rent", "Item Rent"] else None
+                real_estate = frappe.get_single("Real Estate")
+                item_tax_template = real_estate.item_tax_template if contract.used_for in ["Commercial", "Office"] and item["item_code"] in ["Rent"] else None
 
                 sales_invoice.append("items", {
                     "item_code": item["item_code"],
@@ -75,27 +76,33 @@ def create_sales_invoice_and_payment(contract_name):
         # Fetch Other Charges Details (Ejari, Parking, etc.)
         for charge in contract.get("other_charges_details"):
             item_code = None
-            if "Ejari - SSD" in charge.charges_account:
+            real_estate = frappe.get_single("Real Estate")
+            if real_estate.ejari_account in charge.charges_account:
                 item_code = "Ejari"
-            elif "Parking - SSD" in charge.charges_account:
+            elif real_estate.parking_account in charge.charges_account:
                 item_code = "Parking"
 
             if item_code:
                 item_doc = frappe.get_doc("Item", item_code)
-                expense_account = item_doc.item_defaults[0].expense_account if item_doc.item_defaults else "Expense - SSD"
-
+                expense_account = item_doc.item_defaults[0].expense_account if item_doc.item_defaults else None
+                real_estate = frappe.get_single("Real Estate")
                 sales_invoice.append("items", {
                     "item_code": item_code,
                     "qty": 1,
                     "rate": charge.amount,
                     "amount": charge.amount,
                     "income_account": expense_account,  
-                    "item_tax_template": "VAT 5% - SSD" if charge.tax_type == "Taxable" else None
+                    "item_tax_template": real_estate.item_tax_template if charge.tax_type == "Taxable" else None
                 })
 
                 # Fetch tax details and calculate tax amounts
                 if charge.tax_type == "Taxable":
-                    tax_details = frappe.get_doc("Item Tax Template", "VAT 5% - SSD")
+                    real_estate = frappe.get_single("Real Estate")
+
+                    # Fetch the Item Tax Template field from Real Estate doctype
+                    item_tax_template = real_estate.item_tax_template  # Ensure this is the correct fieldname
+
+                    tax_details = frappe.get_doc("Item Tax Template", item_tax_template)
                     for tax in tax_details.get("taxes"):
                         tax_account = tax.tax_type  
                         tax_rate = tax.tax_rate  
@@ -136,16 +143,23 @@ def create_sales_invoice_and_payment(contract_name):
             payment_entry.currency = default_currency
             payment_entry.target_exchange_rate = 1
 
-            # Set payment mode and determine the correct paid_to account
+            real_estate = frappe.get_single("Real Estate")
+
+            # Ensure the correct field names exist in the Real Estate doctype
+            pdc_account = real_estate.pdc_account  # Example field for PDC
+            cash_account = real_estate.cash_account  # Example field for Cash
+            bank_account = real_estate.bank_account  # Example field for Bank
+
+            # Set payment mode and determine the correct paid_to account dynamically
             if receipt.payment_mode == "Cheque":
                 payment_entry.mode_of_payment = "PDC"
-                payment_entry.paid_to = "PDC Receivable - SSD"
+                payment_entry.paid_to = pdc_account if pdc_account else None
             elif receipt.payment_mode == "Cash":
                 payment_entry.mode_of_payment = "Cash"
-                payment_entry.paid_to = "Cash - SSD"
+                payment_entry.paid_to = cash_account if cash_account else None
             else:
                 payment_entry.mode_of_payment = receipt.payment_mode
-                payment_entry.paid_to = "Bank Receivable - SSD"  # Adjust for other payment modes
+                payment_entry.paid_to = bank_receivable_account if bank_receivable_account else None
 
             payment_entry.paid_to_account_currency = default_currency
 
@@ -172,8 +186,9 @@ def create_sales_invoice_and_payment(contract_name):
             payment_entry.submit()
             frappe.db.commit()
         
-        return {"status": "success", "invoice": sales_invoice.name}
+        frappe.msgprint(f"Sales Invoice {sales_invoice.name} and Payment Entries created successfully.", alert=True)
+        return sales_invoice.name
 
     except Exception as e:
-        frappe.log_error(frappe.get_traceback(), "Error in create_sales_invoice_and_payment")
+        frappe.log_error(frappe.get_traceback(), _("Error in create_sales_invoice_and_payment"))
         return {"status": "error", "message": str(e)}

@@ -22,10 +22,16 @@ def create_sales_invoice_and_payment(contract_name):
         sales_invoice = frappe.new_doc("Sales Invoice")
         sales_invoice.customer = contract.tenant
         sales_invoice.currency = default_currency
-
+        # Determine Rent item_code based on contract usage
+        if contract.used_for == "Commercial":
+            rent_item_code = "Rent Commercial"
+        elif contract.used_for == "Residential":
+            rent_item_code = "Rent Residential"
+        else:
+            rent_item_code = "Rent"  # Default fallback
         # Define Sales Invoice Items
         items = [
-            {"item_code": "Rent", "qty": 1, "rate": contract.rent},
+            {"item_code": rent_item_code, "qty": 1, "rate": contract.rent},
             {"item_code": "Commission", "qty": 1, "rate": contract.commission},
             {"item_code": "Deposit", "qty": 1, "rate": contract.refundable_deposit},
         ]
@@ -38,17 +44,19 @@ def create_sales_invoice_and_payment(contract_name):
                 item_doc = frappe.get_doc("Item", item["item_code"])
                 income_account = item_doc.item_defaults[0].income_account if item_doc.item_defaults else None
                 deferred_account = item_doc.item_defaults[0].deferred_revenue_account if item_doc.enable_deferred_revenue else None
-
+                print("deferred_account",deferred_account)
                 # Apply VAT 5% if contract is Commercial or Office
                 real_estate = frappe.get_single("Real Estate")
-                item_tax_template = real_estate.item_tax_template if contract.used_for in ["Commercial", "Office"] and item["item_code"] in ["Rent"] else None
-
+                item_tax_template = real_estate.item_tax_template if contract.used_for in ["Commercial"] and item["item_code"] in ["Rent Commercial"] else None
+                enable_deferred_revenue = 0
+                if item_doc.enable_deferred_revenue:
+                    enable_deferred_revenue=1
                 sales_invoice.append("items", {
                     "item_code": item["item_code"],
                     "qty": item["qty"],
                     "rate": item["rate"],
                     "amount": item["qty"] * item["rate"],
-                    "enable_deferred_revenue": 1,
+                    "enable_deferred_revenue": enable_deferred_revenue,
                     "income_account": income_account,
                     "deferred_revenue_account": deferred_account,
                     "service_start_date": contract.contract_from,
@@ -142,7 +150,9 @@ def create_sales_invoice_and_payment(contract_name):
             payment_entry.received_amount = receipt.amount
             payment_entry.currency = default_currency
             payment_entry.target_exchange_rate = 1
+            payment_entry.custom_tenant_bank_name=receipt.bank_name
 
+            print("receipt.bank_name",receipt.bank_name)
             real_estate = frappe.get_single("Real Estate")
 
             # Ensure the correct field names exist in the Real Estate doctype
@@ -150,6 +160,7 @@ def create_sales_invoice_and_payment(contract_name):
             cash_account = real_estate.cash_account  # Example field for Cash
             bank_account = real_estate.bank_account  # Example field for Bank
 
+            
             # Set payment mode and determine the correct paid_to account dynamically
             if receipt.payment_mode == "Cheque":
                 payment_entry.mode_of_payment = "PDC"
@@ -186,6 +197,21 @@ def create_sales_invoice_and_payment(contract_name):
             payment_entry.submit()
             frappe.db.commit()
         
+        real_estate = frappe.get_single("Real Estate")
+        deferred_income_account = real_estate.deferred_income_account 
+
+        # Create and submit additional entry after Payment Entry
+        Deferred_entry = frappe.new_doc("Process Deferred Accounting")  # Replace "Your Doctype" with the actual doctype
+        Deferred_entry.type = "Income"
+        Deferred_entry.account = deferred_income_account
+        Deferred_entry.start_date = contract.contract_from  # Linking it to the Payment Entry
+        Deferred_entry.posting_date = frappe.utils.today()
+        Deferred_entry.end_date=contract.contract_to
+        # Set any additional fields as per your requirement
+
+        Deferred_entry.insert(ignore_permissions=True)
+        Deferred_entry.submit()
+        frappe.db.commit()       
         frappe.msgprint(f"Sales Invoice {sales_invoice.name} and Payment Entries created successfully.", alert=True)
         return sales_invoice.name
 
